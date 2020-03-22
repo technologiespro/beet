@@ -1,35 +1,16 @@
-import EOS from "./EOSmainnet";
+import EOSmainnet from "./EOSmainnet";
 
-export default class TLOS extends EOS {
+export default class TLOS extends EOSmainnet {
 
-    getBalances(accountName) {
-        return new Promise((resolve, reject) => {
-            this.getAccount(accountName).then((account) => {
-                console.log(account);
-                let balances = [];
-                balances.push({
-                    asset_type: "UIA",
-                    asset_name: "TLOS",
-                    balance: parseFloat(account.core_liquid_balance),
-                    owner: "-",
-                    prefix: ""
-                });
-                balances.push({
-                    asset_type: "UIA",
-                    asset_name: "CPU Stake",
-                    balance: parseFloat(account.total_resources.cpu_weight),
-                    owner: "-",
-                    prefix: ""
-                });
-                balances.push({
-                    asset_type: "UIA",
-                    asset_name: "Bandwith Stake",
-                    balance: parseFloat(account.total_resources.net_weight),
-                    owner: "-",
-                    prefix: ""
-                });
-                resolve(balances);
-            });
-        });
+    getExplorer(object) {
+        if (object.accountName) {
+            return "https://telos.eosx.io/account/" + object.accountName;
+        } else if (object.txid) {
+            // 7aad190067b694b8c3a0eff68afdb4ce986cff71f497da7d90974f23e5e86be8
+            return "https://telos.eosx.io/tx/" + object.txid;
+        } else {
+            return false;
+        }
     }
+
 }

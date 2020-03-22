@@ -7,8 +7,6 @@ import PublicKey from "@whaleshares/wlsjs/lib/auth/ecc/src/key_public";
 
 export default class WhaleShares extends SteemBasedChain {
 
-    // https://github.com/steemit/steem-js/tree/master/doc#broadcast-api
-
     _getSignature() {
         return Signature;
     }
@@ -25,4 +23,11 @@ export default class WhaleShares extends SteemBasedChain {
         return wlsjs;
     }
 
+    getExplorer(object) {
+        if (object.accountName) {
+            return "https://whaleshares.io/whalesharesexplorer/#account/" + object.accountName;
+        } else {
+            return false;
+        }
+    }
 }
