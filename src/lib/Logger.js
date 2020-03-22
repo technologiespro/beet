@@ -1,5 +1,5 @@
-const chalk = require('chalk');
-const readline = require('readline');
+import chalk  from 'chalk';
+import readline from 'readline';
 
 function lpad(str, padString, length) {
     while (str.toString().length < length) {
@@ -70,6 +70,13 @@ class Logger {
             process.stdout.write(chalk.white(this.timestamp()) + ' - ' + chalk.blue('[VERBOSE]') + ' ' + msg + '\n');
         }
     }
+    debug(msg) {
+        if (this.log_level > 1) {
+            readline.clearLine(process.stdout, 0);
+            readline.cursorTo(process.stdout, 0, null);
+            process.stdout.write(chalk.white(this.timestamp()) + ' - ' + chalk.green('[DEBUG]') + ' ' + msg + '\n');
+        }
+    }
     transient(msg) {
         if (this.log_level > 2) {
             readline.clearLine(process.stdout, 0);
@@ -79,4 +86,4 @@ class Logger {
     }
 
 }
-module.exports = Logger;
+export default Logger;

@@ -1,45 +1,76 @@
 import EventEmitter from "events";
-import {
-    version
-} from "../config/config";
+import BeetDB from './BeetDB.js';
 import WebSocket from "ws";
 import {
     v4 as uuidv4
 } from "uuid"
-
 const OTPAuth = require("otpauth");
 import CryptoJS from 'crypto-js';
-import crypto from 'crypto';
-//import eccrypto from 'eccrypto';
 import Https from 'https';
 import Fs from 'fs';
-import {ec as EC} from "elliptic";
-
+import {
+    ec as EC
+} from "elliptic";
+import RendererLogger from "./RendererLogger";
+import store from "../store";
+const logger = new RendererLogger();
 var ec = new EC('curve25519');
 /*
 import RendererLogger from "./RendererLogger";
 const logger = new RendererLogger();
 */
 export default class BeetWS extends EventEmitter {
-    constructor(port, timeout) {
-        super() // required
+    constructor(port, sslport, timeout) {
+        super(); // required
+        this.init(port, sslport, timeout);
+    }
+    async init(port, sslport, timeout) {
         var self = this;
+        let key;
+        let cert;
+        try {
+            key = await fetch('https://raw.githubusercontent.com/beetapp/beet-certs/master/beet.key').then(res => res.text());
+            cert = await fetch('https://raw.githubusercontent.com/beetapp/beet-certs/master/beet.cert').then(res => res.text());
+            
+            let db = BeetDB.ssl_data;
+            let payload= {key: key, cert: cert};
+            db.toArray().then((res) => {
+                if (res.length == 0) {
+                    db.add(payload);
+                } else {
+                    db.update(res[0].id, payload);
+                }
+            })
+        }catch (e) {
+            let ssl = await BeetDB.ssl_data.toArray();
+            if (ssl && ssl.length>0) {
+                key=ssl[0].key;
+                cert=ssl[0].cert;
+            }else{
+                key=Fs.readFileSync(__dirname + '/ssl/beet.key');
+                cert=Fs.readFileSync(__dirname + '/ssl/beet.cert');
+            }
+        }
+        
+       
         const httpsServer = Https.createServer({
-            key: Fs.readFileSync(__dirname + '/ssl/beet.key'),
-            cert: Fs.readFileSync(__dirname + '/ssl/beet.cert')
+            key: key,
+            cert: cert
         });
         const server = new WebSocket.Server({
             server: httpsServer
         });
-        httpsServer.listen(port);
+        const plainserver = new WebSocket.Server({
+            port: port
+        });
+        httpsServer.listen(sslport);
         this._clients = [];
         this._monitor = setInterval(function () {
             for (var clientid in self._clients) {
-
                 let client = self._clients[clientid];
                 if (client.isAlive === false || client.readyState != 1) {
                     self.emit("disconnected", client.id);
-                    delete (self._clients[client.id]);
+                    delete(self._clients[client.id]);
                     return client.terminate();
                 } else {
                     client.isAlive = false;
@@ -48,6 +79,9 @@ export default class BeetWS extends EventEmitter {
             }
         }, timeout);
         server.on("connection", (client) => {
+            self._handleConnection(client);
+        });
+        plainserver.on("connection", (client) => {
             self._handleConnection(client);
         });
     }
@@ -61,95 +95,207 @@ export default class BeetWS extends EventEmitter {
     }
 
     _handleMessage(client, data) {
-        console.log("_handleMessage", client, data);
-        if (data.type == 'version') {
-            client.send('{ "type": "version", "error": false, "result": { "version": ' + JSON.stringify(version) + '}}');
-        } else {
-            if (client.isAuthenticated) {
-                if (client.isLinked) {
-                    if (data.type == 'api') {
+        console.groupCollapsed("incoming request: " + data.type);
+        console.log("payload", data);
+        switch(data.type) {
+            case 'version':
+                let version = {
+                    api: process.env.npm_package_apiversion,
+                    ui: process.env.npm_package_version
+                };
+                client.send('{ "type": "version", "error": false, "result": { "version": ' + JSON.stringify(version) + '}}');
+                break;
+            case 'api':
+                if (client.isAuthenticated) {
+                    if (client.isLinked) {
                         let hash = CryptoJS.SHA256('' + data.id).toString();
                         if (hash == client.next_hash) {
                             client.otp.counter = data.id;
                             var key = client.otp.generate();
-                            console.log("otp key generated", key, client.otp.counter);
                             try {
                                 var msg = JSON.parse(CryptoJS.AES.decrypt(data.payload, key).toString(CryptoJS.enc.Utf8));
 
                                 msg.origin = client.origin;
                                 msg.appName = client.appName;
-                                msg.apphash = client.apphash;
+                                msg.identityhash = client.identityhash;
                                 msg.chain = client.chain;
                                 msg.account_id = client.account_id;
                                 client.next_hash = msg.next_hash;
-                                this.emit('api', {
+                                let event = {
                                     "client": client.id,
                                     "id": data.id,
                                     "type": msg.method,
                                     "payload": msg
-                                });
+                                };
+                                console.log("requesting user response", event);
+                                this.emit('api', event);
                             } catch (e) {
                                 client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code": 3, "message": "Could not decrypt message"}}');
                             }
                         } else {
                             client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code":2,"message": "Unexpected request hash. Please relink"}}');
                         }
-                    } else {
-                        client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code":1, "message": "Beet could not understand your request"}}');
+                    }else{
+                        client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code":4, "message": "This app is not yet linked"}}')
                     }
-                } else {
-                    if (data.type == 'link') {
-                        let linkobj = {
-                            "id": data.id,
-                            "client": client.id,
-                            "payload": data.payload,
-                            "chain": data.payload.chain,
-                            "origin": client.origin,
-                            "appName": client.appName,
-                            "browser": client.browser,
-                            "key": client.keypair,
-                            "type": 'link'
-                        };
-                        this.emit('link', linkobj);
-                    } else {
-                        client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code":4, "message": "This app is not yet linked"}}');
-                    }
-                }
-            } else {
-                if (data.type == 'authenticate') {
-                    this.emit('authenticate', {
-                        "id": data.id,
-                        "client": client.id,
-                        "payload": data.payload
-                    });
-                } else {
+                }else{
                     client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code":5, "message": "Must authenticate first"}}');
                 }
-            }
+                break;
+            case 'link':
+                if (client.isAuthenticated) {
+                    let linkobj = {
+                        "id": data.id,
+                        "client": client.id,
+                        "payload": data.payload,
+                        "chain": data.payload.chain,
+                        "origin": client.origin,
+                        "appName": client.appName,
+                        "browser": client.browser,
+                        "key": client.keypair,
+                        "type": 'link'
+                    };
+                    console.log("requesting user response", linkobj);
+                    this.emit('link', linkobj);
+                }else{
+                    client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code":5, "message": "Must authenticate first"}}');
+                }
+                break;
+            case 'relink':
+                if (client.isAuthenticated) {
+
+                    client.isLinked = false;
+                    let linkobj = {
+                        "id": data.id,
+                        "client": client.id,
+                        "payload": data.payload,
+                        "chain": data.payload.chain,
+                        "origin": client.origin,
+                        "appName": client.appName,
+                        "browser": client.browser,
+                        "key": client.keypair,
+                        "type": 'relink'
+                    };
+                    console.log("requesting user response", linkobj);
+                    this.emit('relink', linkobj);
+                }else{
+                    client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code":5, "message": "Must authenticate first"}}');
+                }
+                break;
+            case 'authenticate':
+                let event = {
+                    "id": data.id,
+                    "client": client.id,
+                    "payload": data.payload
+                };
+                console.log("constructing authentication response", event);
+                this.emit('authenticate', event);
+
+                break;
+            default:
+                client.send('{ "id": "' + data.id + '", "error": true, "payload": { "code":1, "message": "Beet could not understand your request"}}');
+                break;
         }
+        console.groupEnd();
     }
 
-    async respondLink(client, result) {
-        if (result.isLinked == true) {
-            this._clients[client].isLinked = true;
-            this._clients[client].apphash = result.apphash;
-            this._clients[client].account_id = result.account_id;
-            this._clients[client].chain = result.chain;
-            this._clients[client].next_hash = result.next_hash;
-            let otp = new OTPAuth.HOTP({
-                issuer: "Beet",
-                label: "BeetAuth",
-                algorithm: "SHA1",
-                digits: 32,
-                counter: 0,
-                secret: OTPAuth.Secret.fromHex(result.secret)
-            });
-            console.log("otp instantiated", result.secret);
-            this._clients[client].otp = otp;
-            this._clients[client].send('{"id": ' + result.id + ', "error": false, "payload": { "authenticate": true, "link": true, "account_id": "' + result.account_id + '"}}');
-        } else {
-            this._clients[client].send('{ "id": "' + result.id + '", "error": true, "payload": { "code":6, "message": "Could not link to Beet"}}');
+    respondLink(client, result) {
+        if (result.isLinked == true || result.link == true) {
+            // link has successfully established
+            this._establishLink(
+                client,
+                result
+            );
         }
+        this._clients[client].send(this._getLinkResponse(result));
+    }
+
+    respondReLink(client, result) {
+        if (result.isLinked == true || result.link == true) {
+            // link has successfully established
+            this._establishLink(
+                client,
+                result
+            );
+        }
+        this._clients[client].send(this._getLinkResponse(result));
+    }
+    _establishLink(client, target) {
+        this._clients[client].isLinked = true;
+        this._clients[client].identityhash = target.identityhash;
+        this._clients[client].account_id = target.app.account_id;
+        this._clients[client].chain = target.app.chain;
+        this._clients[client].next_hash = target.app.next_hash;
+        this._clients[client].otp = new OTPAuth.HOTP({
+            issuer: "Beet",
+            label: "BeetAuth",
+            algorithm: "SHA1",
+            digits: 32,
+            counter: 0,
+            secret: OTPAuth.Secret.fromHex(target.app.secret)
+        });
+    }
+
+    _getLinkResponse(result) {
+        let response = null;
+        // todo: unify! isLinked comes from linkHandler, link from authHandler.
+
+        if (result.isLinked == true || result.link == true) {
+            if (result.app) {
+                response = {
+                    id: result.id,
+                    error: false,
+                    payload: {
+                        authenticate: true,
+                        link: true,
+                        chain: result.chain,
+                        existing: result.existing,
+                        identityhash: result.identityhash,
+                        requested: {
+                            account: {
+                                name: result.app.account_name,
+                                id: result.app.account_id
+                            }
+                        }
+                    }
+                };
+            } else {
+                response = {
+                    id: result.id,
+                    error: false,
+                    payload: {
+                        authenticate: true,
+                        link: true,
+                        chain: result.identity.chain,
+                        existing: result.existing,
+                        identityhash: result.identityhash,
+                        requested: {
+                            account: {
+                                name: result.identity.name,
+                                id: result.identity.id
+                            }
+                        }
+                    }
+                };
+            }
+            // todo: analyze why the account name is not set and treat the cause not the sympton
+            if (!response.payload.requested.account.name) {
+                response.payload.requested.account.name = store.state.AccountStore.accountlist.find(
+                    x => x.accountID == response.payload.requested.account.id
+                ).accountName;
+            }
+        } else {
+            response = {
+                id: result.id,
+                error: true,
+                payload: {
+                    code: 6,
+                    message: "Could not link to Beet"
+                }
+            };
+        }
+
+        return JSON.stringify(response);
     }
 
     respondAPI(client, response) {
@@ -160,36 +306,40 @@ export default class BeetWS extends EventEmitter {
     }
 
     respondAuth(client, result) {
+        let response = null;
         if (result.authenticate) {
+            console.log("authentification result", result);
             this._clients[client].isAuthenticated = true;
             this._clients[client].origin = result.origin;
             this._clients[client].appName = result.appName;
             this._clients[client].browser = result.browser;
             if (result.link) {
-                this._clients[client].isLinked = true;
-                this._clients[client].apphash = result.apphash;
-                this._clients[client].chain = result.app.chain;
-                this._clients[client].account_id = result.app.account_id;
-                this._clients[client].next_hash = result.app.next_hash;
-                let otp = new OTPAuth.HOTP({
-                    issuer: "Beet",
-                    label: "BeetAuth",
-                    algorithm: "SHA1",
-                    digits: 32,
-                    counter: 0,
-                    secret: OTPAuth.Secret.fromHex(result.app.secret)
-                });
-                console.log("otp instantiated", result.app, result.app.secret.toString());
-                this._clients[client].otp = otp;
-                this._clients[client].send('{"id": ' + result.id + ', "error": false, "payload": { "authenticate": true, "link": true, "account_id": "' + result.app.account_id + '"}}');
+                this.respondLink(client, result);
             } else {
                 let keypair = ec.genKeyPair();
                 this._clients[client].keypair = keypair;
                 let pubkey = keypair.getPublic().encode('hex');
-                this._clients[client].send('{"id": ' + result.id + ', "error": false, "payload": { "authenticate": true, "link": false, "pub_key": "' + pubkey + '"}}');
+                response = {
+                    id: result.id,
+                    error: false,
+                    payload: {
+                        authenticate: true,
+                        link: false,
+                        pub_key: pubkey
+                    }
+                };
+                this._clients[client].send(JSON.stringify(response));
             }
         } else {
-            this._clients[client].send('{"id": ' + result.id + ', "error": true, "payload": { "code":7, "message": "Could not authenticate"}}');
+            response = {
+                id: result.id,
+                error: true,
+                payload: {
+                    code: 7,
+                    message: "Could not authenticate"
+                }
+            };
+            this._clients[client].send(JSON.stringify(response));
         }
     }
 
